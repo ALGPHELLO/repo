@@ -35,6 +35,7 @@ from git_config import GitConfig, IsId, GetSchemeFromUrl, GetUrlCookieFile, \
 from error import GitError, HookError, UploadError, DownloadError
 from error import ManifestInvalidRevisionError
 from error import NoManifestException
+import platform_utils
 from trace import IsTrace, Trace
 
 from git_refs import GitRefs, HEAD, R_HEADS, R_TAGS, R_PUB, R_M
@@ -62,9 +63,9 @@ def _lwrite(path, content):
     fd.close()
 
   try:
-    os.rename(lock, path)
+    platform_utils.rename(lock, path)
   except OSError:
-    os.remove(lock)
+    platform_utils.remove(lock)
     raise
 
 
@@ -102,7 +103,7 @@ def _ProjectHooks():
   """
   global _project_hook_list
   if _project_hook_list is None:
-    d = os.path.realpath(os.path.abspath(os.path.dirname(__file__)))
+    d = platform_utils.realpath(os.path.abspath(os.path.dirname(__file__)))
     d = os.path.join(d, 'hooks')
     _project_hook_list = [os.path.join(d, x) for x in os.listdir(d)]
   return _project_hook_list
@@ -176,12 +177,20 @@ class ReviewableBranch(object):
   def UploadForReview(self, people,
                       auto_topic=False,
                       draft=False,
-                      dest_branch=None):
+                      private=False,
+                      wip=False,
+                      dest_branch=None,
+                      validate_certs=True,
+                      push_options=None):
     self.project.UploadForReview(self.name,
                                  people,
                                  auto_topic=auto_topic,
                                  draft=draft,
-                                 dest_branch=dest_branch)
+                                 private=private,
+                                 wip=wip,
+                                 dest_branch=dest_branch,
+                                 validate_certs=validate_certs,
+                                 push_options=push_options)
 
   def GetPublishedRefs(self):
     refs = {}
@@ -243,7 +252,7 @@ class _CopyFile(object):
       try:
         # remove existing file first, since it might be read-only
         if os.path.exists(dest):
-          os.remove(dest)
+          platform_utils.remove(dest)
         else:
           dest_dir = os.path.dirname(dest)
           if not os.path.isdir(dest_dir):
@@ -268,16 +277,16 @@ class _LinkFile(object):
 
   def __linkIt(self, relSrc, absDest):
     # link file if it does not exist or is out of date
-    if not os.path.islink(absDest) or (os.readlink(absDest) != relSrc):
+    if not platform_utils.islink(absDest) or (platform_utils.readlink(absDest) != relSrc):
       try:
         # remove existing file first, since it might be read-only
         if os.path.lexists(absDest):
-          os.remove(absDest)
+          platform_utils.remove(absDest)
         else:
           dest_dir = os.path.dirname(absDest)
           if not os.path.isdir(dest_dir):
             os.makedirs(dest_dir)
-        os.symlink(relSrc, absDest)
+        platform_utils.symlink(relSrc, absDest)
       except IOError:
         _error('Cannot link file %s to %s', relSrc, absDest)
 
@@ -651,6 +660,7 @@ class Project(object):
                groups=None,
                sync_c=False,
                sync_s=False,
+               sync_tags=True,
                clone_depth=None,
                upstream=None,
                parent=None,
@@ -674,6 +684,7 @@ class Project(object):
       groups: The `groups` attribute of manifest.xml's project element.
       sync_c: The `sync-c` attribute of manifest.xml's project element.
       sync_s: The `sync-s` attribute of manifest.xml's project element.
+      sync_tags: The `sync-tags` attribute of manifest.xml's project element.
       upstream: The `upstream` attribute of manifest.xml's project element.
       parent: The parent Project object.
       is_derived: False if the project was explicitly defined in the manifest;
@@ -706,6 +717,7 @@ class Project(object):
     self.groups = groups
     self.sync_c = sync_c
     self.sync_s = sync_s
+    self.sync_tags = sync_tags
     self.clone_depth = clone_depth
     self.upstream = upstream
     self.parent = parent
@@ -1107,7 +1119,11 @@ class Project(object):
                       people=([], []),
                       auto_topic=False,
                       draft=False,
-                      dest_branch=None):
+                      private=False,
+                      wip=False,
+                      dest_branch=None,
+                      validate_certs=True,
+                      push_options=None):
     """Uploads the named branch for code review.
     """
     if branch is None:
@@ -1132,7 +1148,7 @@ class Project(object):
       branch.remote.projectname = self.name
       branch.remote.Save()
 
-    url = branch.remote.ReviewUrl(self.UserEmail)
+    url = branch.remote.ReviewUrl(self.UserEmail, validate_certs)
     if url is None:
       raise UploadError('review not configured')
     cmd = ['push']
@@ -1144,6 +1160,10 @@ class Project(object):
       for e in people[1]:
         rp.append('--cc=%s' % sq(e))
       cmd.append('--receive-pack=%s' % " ".join(rp))
+
+    for push_option in (push_options or []):
+      cmd.append('-o')
+      cmd.append(push_option)
 
     cmd.append(url)
 
@@ -1158,9 +1178,14 @@ class Project(object):
                                   dest_branch)
     if auto_topic:
       ref_spec = ref_spec + '/' + branch.name
+
     if not url.startswith('ssh://'):
       rp = ['r=%s' % p for p in people[0]] + \
            ['cc=%s' % p for p in people[1]]
+      if private:
+        rp = rp + ['private']
+      if wip:
+        rp = rp + ['wip']
       if rp:
         ref_spec = ref_spec + '%' + ','.join(rp)
     cmd.append(ref_spec)
@@ -1227,7 +1252,7 @@ class Project(object):
       if not self._ExtractArchive(tarpath, path=topdir):
         return False
       try:
-        os.remove(tarpath)
+        platform_utils.remove(tarpath)
       except OSError as e:
         _warn("Cannot remove archive %s: %s", tarpath, str(e))
       self._CopyAndLinkFiles()
@@ -1243,9 +1268,10 @@ class Project(object):
     if is_new:
       alt = os.path.join(self.gitdir, 'objects/info/alternates')
       try:
-        fd = open(alt, 'rb')
+        fd = open(alt)
         try:
-          alt_dir = fd.readline().rstrip()
+          # This works for both absolute and relative alternate directories.
+          alt_dir = os.path.join(self.objdir, 'objects', fd.readline().rstrip())
         finally:
           fd.close()
       except IOError:
@@ -1267,6 +1293,10 @@ class Project(object):
       elif self.manifest.default.sync_c:
         current_branch_only = True
 
+    if not no_tags:
+      if not self.sync_tags:
+        no_tags = True
+
     if self.clone_depth:
       depth = self.clone_depth
     else:
@@ -1274,7 +1304,7 @@ class Project(object):
 
     need_to_fetch = not (optimized_fetch and
                          (ID_RE.match(self.revisionExpr) and
-                          self._CheckForSha1()))
+                          self._CheckForImmutableRevision()))
     if (need_to_fetch and
         not self._RemoteFetch(initial=is_new, quiet=quiet, alt_dir=alt_dir,
                               current_branch_only=current_branch_only,
@@ -1287,7 +1317,7 @@ class Project(object):
     else:
       self._InitMirrorHead()
       try:
-        os.remove(os.path.join(self.gitdir, 'FETCH_HEAD'))
+        platform_utils.remove(os.path.join(self.gitdir, 'FETCH_HEAD'))
       except OSError:
         pass
     return True
@@ -1797,7 +1827,7 @@ class Project(object):
       except GitError:
         return [], []
       finally:
-        os.remove(temp_gitmodules_path)
+        platform_utils.remove(temp_gitmodules_path)
 
       names = set()
       paths = {}
@@ -1858,6 +1888,8 @@ class Project(object):
         result.extend(project.GetDerivedSubprojects())
         continue
 
+      if url.startswith('..'):
+        url = urllib.parse.urljoin("%s/" % self.remote.url, url)
       remote = RemoteSpec(self.remote.name,
                           url=url,
                           pushUrl=self.remote.pushUrl,
@@ -1876,6 +1908,7 @@ class Project(object):
                            groups=self.groups,
                            sync_c=self.sync_c,
                            sync_s=self.sync_s,
+                           sync_tags=self.sync_tags,
                            parent=self,
                            is_derived=True)
       result.append(subproject)
@@ -1884,7 +1917,7 @@ class Project(object):
 
 
 # Direct Git Commands ##
-  def _CheckForSha1(self):
+  def _CheckForImmutableRevision(self):
     try:
       # if revision (sha or tag) is not present then following function
       # throws an error.
@@ -1938,7 +1971,9 @@ class Project(object):
         tag_name = self.revisionExpr[len(R_TAGS):]
 
       if is_sha1 or tag_name is not None:
-        if self._CheckForSha1():
+        if self._CheckForImmutableRevision():
+          print('Skipped fetching project %s (already have persistent ref)'
+                % self.name)
           return True
       if is_sha1 and not depth:
         # When syncing a specific commit and --depth is not set:
@@ -2087,14 +2122,14 @@ class Project(object):
         if old_packed != '':
           _lwrite(packed_refs, old_packed)
         else:
-          os.remove(packed_refs)
+          platform_utils.remove(packed_refs)
       self.bare_git.pack_refs('--all', '--prune')
 
     if is_sha1 and current_branch_only:
       # We just synced the upstream given branch; verify we
       # got what we wanted, else trigger a second run of all
       # refs.
-      if not self._CheckForSha1():
+      if not self._CheckForImmutableRevision():
         if current_branch_only and depth:
           # Sync the current branch only with depth set to None
           return self._RemoteFetch(name=name,
@@ -2149,14 +2184,14 @@ class Project(object):
 
     ok = GitCommand(self, cmd, bare=True).Wait() == 0
     if os.path.exists(bundle_dst):
-      os.remove(bundle_dst)
+      platform_utils.remove(bundle_dst)
     if os.path.exists(bundle_tmp):
-      os.remove(bundle_tmp)
+      platform_utils.remove(bundle_tmp)
     return ok
 
   def _FetchBundle(self, srcUrl, tmpPath, dstPath, quiet):
     if os.path.exists(dstPath):
-      os.remove(dstPath)
+      platform_utils.remove(dstPath)
 
     cmd = ['curl', '--fail', '--output', tmpPath, '--netrc', '--location']
     if quiet:
@@ -2166,7 +2201,7 @@ class Project(object):
       if size >= 1024:
         cmd += ['--continue-at', '%d' % (size,)]
       else:
-        os.remove(tmpPath)
+        platform_utils.remove(tmpPath)
     if 'http_proxy' in os.environ and 'darwin' == sys.platform:
       cmd += ['--proxy', os.environ['http_proxy']]
     with GetUrlCookieFile(srcUrl, quiet) as (cookiefile, _proxy):
@@ -2197,10 +2232,10 @@ class Project(object):
 
     if os.path.exists(tmpPath):
       if curlret == 0 and self._IsValidBundle(tmpPath, quiet):
-        os.rename(tmpPath, dstPath)
+        platform_utils.rename(tmpPath, dstPath)
         return True
       else:
-        os.remove(tmpPath)
+        platform_utils.remove(tmpPath)
         return False
     else:
       return False
@@ -2234,6 +2269,16 @@ class Project(object):
     if GitCommand(self, cmd).Wait() != 0:
       if self._allrefs:
         raise GitError('%s cherry-pick %s ' % (self.name, rev))
+
+  def _LsRemote(self, refs):
+    cmd = ['ls-remote', self.remote.name, refs]
+    p = GitCommand(self, cmd, capture_stdout=True)
+    if p.Wait() == 0:
+      if hasattr(p.stdout, 'decode'):
+        return p.stdout.decode('utf-8')
+      else:
+        return p.stdout
+    return None
 
   def _Revert(self, rev):
     cmd = ['revert']
@@ -2298,10 +2343,10 @@ class Project(object):
             print("Retrying clone after deleting %s" %
                   self.gitdir, file=sys.stderr)
             try:
-              shutil.rmtree(os.path.realpath(self.gitdir))
-              if self.worktree and os.path.exists(os.path.realpath
+              platform_utils.rmtree(platform_utils.realpath(self.gitdir))
+              if self.worktree and os.path.exists(platform_utils.realpath
                                                   (self.worktree)):
-                shutil.rmtree(os.path.realpath(self.worktree))
+                platform_utils.rmtree(platform_utils.realpath(self.worktree))
               return self._InitGitDir(mirror_git=mirror_git, force_sync=False)
             except:
               raise e
@@ -2327,6 +2372,10 @@ class Project(object):
             ref_dir = None
 
           if ref_dir:
+            if not os.path.isabs(ref_dir):
+              # The alternate directory is relative to the object database.
+              ref_dir = os.path.relpath(ref_dir,
+                                        os.path.join(self.objdir, 'objects'))
             _lwrite(os.path.join(self.gitdir, 'objects/info/alternates'),
                     os.path.join(ref_dir, 'objects') + '\n')
 
@@ -2343,9 +2392,9 @@ class Project(object):
           self.config.SetString('core.bare', None)
     except Exception:
       if init_obj_dir and os.path.exists(self.objdir):
-        shutil.rmtree(self.objdir)
+        platform_utils.rmtree(self.objdir)
       if init_git_dir and os.path.exists(self.gitdir):
-        shutil.rmtree(self.gitdir)
+        platform_utils.rmtree(self.gitdir)
       raise
 
   def _UpdateHooks(self):
@@ -2353,7 +2402,7 @@ class Project(object):
       self._InitHooks()
 
   def _InitHooks(self):
-    hooks = os.path.realpath(self._gitdir_path('hooks'))
+    hooks = platform_utils.realpath(self._gitdir_path('hooks'))
     if not os.path.exists(hooks):
       os.makedirs(hooks)
     for stock_hook in _ProjectHooks():
@@ -2369,20 +2418,21 @@ class Project(object):
         continue
 
       dst = os.path.join(hooks, name)
-      if os.path.islink(dst):
+      if platform_utils.islink(dst):
         continue
       if os.path.exists(dst):
         if filecmp.cmp(stock_hook, dst, shallow=False):
-          os.remove(dst)
+          platform_utils.remove(dst)
         else:
           _warn("%s: Not replacing locally modified %s hook",
                 self.relpath, name)
           continue
       try:
-        os.symlink(os.path.relpath(stock_hook, os.path.dirname(dst)), dst)
+        platform_utils.symlink(
+            os.path.relpath(stock_hook, os.path.dirname(dst)), dst)
       except OSError as e:
         if e.errno == errno.EPERM:
-          raise GitError('filesystem must support symlinks')
+          raise GitError(self._get_symlink_error_message())
         else:
           raise
 
@@ -2438,9 +2488,9 @@ class Project(object):
       symlink_dirs += self.working_tree_dirs
     to_symlink = symlink_files + symlink_dirs
     for name in set(to_symlink):
-      dst = os.path.realpath(os.path.join(destdir, name))
+      dst = platform_utils.realpath(os.path.join(destdir, name))
       if os.path.lexists(dst):
-        src = os.path.realpath(os.path.join(srcdir, name))
+        src = platform_utils.realpath(os.path.join(srcdir, name))
         # Fail if the links are pointing to the wrong place
         if src != dst and self._LocallyChanged():
           _error('%s is different in %s vs %s', name, destdir, srcdir)
@@ -2472,10 +2522,10 @@ class Project(object):
     if copy_all:
       to_copy = os.listdir(gitdir)
 
-    dotgit = os.path.realpath(dotgit)
+    dotgit = platform_utils.realpath(dotgit)
     for name in set(to_copy).union(to_symlink):
       try:
-        src = os.path.realpath(os.path.join(gitdir, name))
+        src = platform_utils.realpath(os.path.join(gitdir, name))
         dst = os.path.join(dotgit, name)
 
         if os.path.lexists(dst):
@@ -2486,8 +2536,9 @@ class Project(object):
           os.makedirs(src)
 
         if name in to_symlink:
-          os.symlink(os.path.relpath(src, os.path.dirname(dst)), dst)
-        elif copy_all and not os.path.islink(dst):
+          platform_utils.symlink(
+              os.path.relpath(src, os.path.dirname(dst)), dst)
+        elif copy_all and not platform_utils.islink(dst):
           if os.path.isdir(src):
             shutil.copytree(src, dst)
           elif os.path.isfile(src):
@@ -2497,13 +2548,13 @@ class Project(object):
         # file doesn't either.
         if name in symlink_files and not os.path.lexists(src):
           try:
-            os.remove(dst)
+            platform_utils.remove(dst)
           except OSError:
             pass
 
       except OSError as e:
         if e.errno == errno.EPERM:
-          raise DownloadError('filesystem must support symlinks')
+          raise DownloadError(self._get_symlink_error_message())
         else:
           raise
 
@@ -2521,7 +2572,7 @@ class Project(object):
       except GitError as e:
         if force_sync:
           try:
-            shutil.rmtree(dotgit)
+            platform_utils.rmtree(dotgit)
             return self._InitWorkTree(force_sync=False, submodules=submodules)
           except:
             raise e
@@ -2541,11 +2592,19 @@ class Project(object):
         self._CopyAndLinkFiles()
     except Exception:
       if init_dotgit:
-        shutil.rmtree(dotgit)
+        platform_utils.rmtree(dotgit)
       raise
 
+  def _get_symlink_error_message(self):
+    if platform_utils.isWindows():
+      return ('Unable to create symbolic link. Please re-run the command as '
+              'Administrator, or see '
+              'https://github.com/git-for-windows/git/wiki/Symbolic-Links '
+              'for other options.')
+    return 'filesystem must support symlinks'
+
   def _gitdir_path(self, path):
-    return os.path.realpath(os.path.join(self.gitdir, path))
+    return platform_utils.realpath(os.path.join(self.gitdir, path))
 
   def _revlist(self, *args, **kw):
     a = []
@@ -2680,11 +2739,11 @@ class Project(object):
       else:
         path = os.path.join(self._project.worktree, '.git', HEAD)
       try:
-        fd = open(path, 'rb')
+        fd = open(path)
       except IOError as e:
         raise NoManifestException(path, str(e))
       try:
-        line = fd.read()
+        line = fd.readline()
       finally:
         fd.close()
       try:

@@ -32,6 +32,7 @@ else:
 import gitc_utils
 from git_config import GitConfig
 from git_refs import R_HEADS, HEAD
+import platform_utils
 from project import RemoteSpec, Project, MetaProject
 from error import ManifestParseError, ManifestInvalidRevisionError
 
@@ -62,6 +63,7 @@ class _Default(object):
   sync_j = 1
   sync_c = False
   sync_s = False
+  sync_tags = True
 
   def __eq__(self, other):
     return self.__dict__ == other.__dict__
@@ -165,8 +167,8 @@ class XmlManifest(object):
 
     try:
       if os.path.lexists(self.manifestFile):
-        os.remove(self.manifestFile)
-      os.symlink(os.path.join('manifests', name), self.manifestFile)
+        platform_utils.remove(self.manifestFile)
+      platform_utils.symlink(os.path.join('manifests', name), self.manifestFile)
     except OSError as e:
       raise ManifestParseError('cannot link manifest %s: %s' % (name, str(e)))
 
@@ -237,6 +239,9 @@ class XmlManifest(object):
     if d.sync_s:
       have_default = True
       e.setAttribute('sync-s', 'true')
+    if not d.sync_tags:
+      have_default = True
+      e.setAttribute('sync-tags', 'false')
     if have_default:
       root.appendChild(e)
       root.appendChild(doc.createTextNode(''))
@@ -325,6 +330,9 @@ class XmlManifest(object):
 
       if p.sync_s:
         e.setAttribute('sync-s', 'true')
+
+      if not p.sync_tags:
+        e.setAttribute('sync-tags', 'false')
 
       if p.clone_depth:
         e.setAttribute('clone-depth', str(p.clone_depth))
@@ -563,12 +571,15 @@ class XmlManifest(object):
         groups = node.getAttribute('groups')
         if groups:
           groups = self._ParseGroups(groups)
+        revision = node.getAttribute('revision')
 
         for p in self._projects[name]:
           if path and p.relpath != path:
             continue
           if groups:
             p.groups.extend(groups)
+          if revision:
+            p.revisionExpr = revision
       if node.nodeName == 'repo-hooks':
         # Get the name of the project and the (space-separated) list of enabled.
         repo_hooks_project = self._reqatt(node, 'in-project')
@@ -701,6 +712,12 @@ class XmlManifest(object):
       d.sync_s = False
     else:
       d.sync_s = sync_s.lower() in ("yes", "true", "1")
+
+    sync_tags = node.getAttribute('sync-tags')
+    if not sync_tags:
+      d.sync_tags = True
+    else:
+      d.sync_tags = sync_tags.lower() in ("yes", "true", "1")
     return d
 
   def _ParseNotice(self, node):
@@ -795,6 +812,12 @@ class XmlManifest(object):
     else:
       sync_s = sync_s.lower() in ("yes", "true", "1")
 
+    sync_tags = node.getAttribute('sync-tags')
+    if not sync_tags:
+      sync_tags = self._default.sync_tags
+    else:
+      sync_tags = sync_tags.lower() in ("yes", "true", "1")
+
     clone_depth = node.getAttribute('clone-depth')
     if clone_depth:
       try:
@@ -840,6 +863,7 @@ class XmlManifest(object):
                       groups = groups,
                       sync_c = sync_c,
                       sync_s = sync_s,
+                      sync_tags = sync_tags,
                       clone_depth = clone_depth,
                       upstream = upstream,
                       parent = parent,

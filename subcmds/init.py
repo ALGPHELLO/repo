@@ -17,7 +17,6 @@ from __future__ import print_function
 import os
 import platform
 import re
-import shutil
 import sys
 
 from pyversion import is_python3
@@ -35,6 +34,7 @@ from error import ManifestParseError
 from project import SyncBuffer
 from git_config import GitConfig
 from git_command import git_require, MIN_GIT_VERSION
+import platform_utils
 
 class Init(InteractiveCommand, MirrorSafeCommand):
   common = True
@@ -175,7 +175,8 @@ to update the working directory files.
         if not mirrored_manifest_git.endswith(".git"):
           mirrored_manifest_git += ".git"
         if not os.path.exists(mirrored_manifest_git):
-          mirrored_manifest_git = os.path.join(opt.reference + '/.repo/manifests.git')
+          mirrored_manifest_git = os.path.join(opt.reference,
+                                               '.repo/manifests.git')
 
       m._InitGitDir(mirror_git=mirrored_manifest_git)
 
@@ -252,7 +253,7 @@ to update the working directory files.
       # Better delete the manifest git dir if we created it; otherwise next
       # time (when user fixes problems) we won't go through the "is_new" logic.
       if is_new:
-        shutil.rmtree(m.gitdir)
+        platform_utils.rmtree(m.gitdir)
       sys.exit(1)
 
     if opt.manifest_branch:
@@ -401,7 +402,7 @@ to update the working directory files.
     git_require(MIN_GIT_VERSION, fail=True)
 
     if opt.reference:
-      opt.reference = os.path.abspath(os.path.expanduser(opt.reference))
+      opt.reference = os.path.expanduser(opt.reference)
 
     # Check this here, else manifest will be tagged "not new" and init won't be
     # possible anymore without removing the .repo/manifests directory.
