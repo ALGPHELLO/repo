@@ -48,9 +48,7 @@ else:
   import urlparse
   urllib = imp.new_module('urllib')
   urllib.parse = urlparse
-  # pylint:disable=W0622
   input = raw_input
-  # pylint:enable=W0622
 
 
 def _lwrite(path, content):
@@ -2679,7 +2677,7 @@ class Project(object):
         out = p.stdout
         if out:
           # Backslash is not anomalous
-          return out[:-1].split('\0')  # pylint: disable=W1401
+          return out[:-1].split('\0')
       return []
 
     def DiffZ(self, name, *args):
@@ -2696,7 +2694,7 @@ class Project(object):
         out = p.process.stdout.read()
         r = {}
         if out:
-          out = iter(out[:-1].split('\0'))  # pylint: disable=W1401
+          out = iter(out[:-1].split('\0'))
           while out:
             try:
               info = next(out)

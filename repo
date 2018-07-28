@@ -144,6 +144,10 @@ def _print(*objects, **kwargs):
   out = kwargs.get('file', sys.stdout)
   out.write(sep.join(objects) + end)
 
+  # On Windows stderr is buffered, so flush to maintain the order of error messages.
+  if out == sys.stderr and platform.system() == "Windows":
+    out.flush()
+
 
 # Python version check
 ver = sys.version_info
@@ -357,16 +361,17 @@ def _Init(args, gitc_init=False):
     dst = os.path.abspath(os.path.join(repodir, S_repo))
     _Clone(url, dst, opt.quiet, not opt.no_clone_bundle)
 
-    if not os.path.isfile('%s/repo' % dst):
-      _print("warning: '%s' does not look like a git-repo repository, is "
-             "REPO_URL set correctly?" % url, file=sys.stderr)
-
     if can_verify and not opt.no_repo_verify:
       rev = _Verify(dst, branch, opt.quiet)
     else:
       rev = 'refs/remotes/origin/%s^0' % branch
 
     _Checkout(dst, branch, rev, opt.quiet)
+
+    if not os.path.isfile(os.path.join(dst, 'repo')):
+      _print("warning: '%s' does not look like a git-repo repository, is "
+             "REPO_URL set correctly?" % url, file=sys.stderr)
+
   except CloneFailure:
     if opt.quiet:
       _print('fatal: repo init failed; run without --quiet to see why',
@@ -502,7 +507,7 @@ def _InitHttp():
       p = n.hosts[host]
       mgr.add_password(p[1], 'http://%s/' % host, p[0], p[2])
       mgr.add_password(p[1], 'https://%s/' % host, p[0], p[2])
-  except:  # pylint: disable=bare-except
+  except:
     pass
   handlers.append(urllib.request.HTTPBasicAuthHandler(mgr))
   handlers.append(urllib.request.HTTPDigestAuthHandler(mgr))
